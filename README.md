@@ -64,13 +64,13 @@ The following model configurations were compared using the same nested cross-val
 
 
 **Code for Ablation Study:**        
-└── src/                    
-    ├── Bayesian_Optimization/   
-    ├── FinalModel/               
-    ├── TabNet+LightGBM/          
-    ├── TabNet+XGBoost/           
-    ├── TabNet+XGBoost+LightGBM/ 
-    └── bc_test.py                
+* `src/`: [Click to open the source code folder](./src/)
+    * `Bayesian_Optimization/`: [Bayesian Optimization scripts](./src/Bayesian_Optimization/)
+    * `FinalModel/`: [The complete Stacking model for the paper](./src/FinalModel/)
+    * `TabNet+LightGBM/`: [Ablation study code (TabNet + LGBM)](./src/TabNet+LightGBM/)
+    * `TabNet+XGBoost/`: [Ablation study code (TabNet + XGB)](./src/TabNet+XGBoost/)
+    * `TabNet+XGBoost+LightGBM/`: [Ablation study code (All models)](./src/TabNet+XGBoost+LightGBM/)
+    * `bc_test.py`: [Main script to run tests or the final model](./src/bc_test.py)
 ---
 
 ## Expected Results
