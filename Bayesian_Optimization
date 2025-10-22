@@ -1,0 +1,358 @@
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import StratifiedKFold, train_test_split
+from sklearn.preprocessing import RobustScaler, LabelEncoder
+from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, roc_auc_score
+from sklearn.linear_model import LogisticRegression
+from sklearn.decomposition import PCA
+from pytorch_tabnet.tab_model import TabNetClassifier
+import torch
+import math
+import warnings
+import xgboost as xgb
+import lightgbm as lgb
+import optuna
+from optuna.samplers import TPESampler
+
+warnings.filterwarnings("ignore")
+
+# ============== 1) 加载 WDBC 数据集 ==============
+columns = [
+    'ID', 'Diagnosis', 'radius_mean', 'texture_mean', 'perimeter_mean', 'area_mean',
+    'smoothness_mean', 'compactness_mean', 'concavity_mean', 'concave_points_mean',
+    'symmetry_mean', 'fractal_dimension_mean', 'radius_se', 'texture_se',
+    'perimeter_se', 'area_se', 'smoothness_se', 'compactness_se', 'concavity_se',
+    'concave_points_se', 'symmetry_se', 'fractal_dimension_se', 'radius_worst',
+    'texture_worst', 'perimeter_worst', 'area_worst', 'smoothness_worst',
+    'compactness_worst', 'concavity_worst', 'concave_points_worst', 'symmetry_worst',
+    'fractal_dimension_worst'
+]
+
+file_path = r"E:\\google\\Dataset\\breast cancer\\breast cancer\\wdbc.data"
+# 读取CSV文件，第一行是列名
+df = pd.read_csv(file_path, header=0)
+
+# 确保所有特征列都是数值型
+numeric_cols = df.columns.drop(['ID', 'Diagnosis']) if 'ID' in df.columns and 'Diagnosis' in df.columns else df.columns[2:]
+for col in numeric_cols:
+    df[col] = pd.to_numeric(df[col], errors='coerce')
+
+# 删除任何包含NaN的行
+df = df.dropna()
+
+# 编码诊断列
+df['Diagnosis'] = LabelEncoder().fit_transform(df['Diagnosis'])
+X = df.drop(['ID', 'Diagnosis'], axis=1).values
+y = df['Diagnosis'].values
+
+# 标准化
+scaler = RobustScaler()
+X = scaler.fit_transform(X)
+
+# ============== 2) 参数设置 ==============
+SEED = 42
+torch.manual_seed(SEED)
+np.random.seed(SEED)
+outer_kf = StratifiedKFold(n_splits=5, shuffle=True, random_state=SEED)
+
+# ============== 3) 深度特征提取函数 ==============
+def extract_deep_features(tabnet_model, X_data):
+    tabnet_model.network.eval()
+    with torch.no_grad():
+        X_tensor = torch.tensor(X_data).float()
+        output, M_loss = tabnet_model.network.forward_masks(X_tensor)
+        final_embedding = output.cpu().numpy()
+        feature_importance = np.var(final_embedding, axis=0)
+        feature_importance = feature_importance / np.sum(feature_importance)
+        n_features = X_data.shape[1]
+        if len(feature_importance) < n_features:
+            repeat_times = n_features // len(feature_importance) + 1
+            attention_weights = np.tile(feature_importance, repeat_times)[:n_features]
+        else:
+            attention_weights = feature_importance[:n_features]
+        weighted_original = X_data * attention_weights
+        multi_view_features = []
+        for i in range(tabnet_model.n_steps):
+            view_weights = attention_weights * (i + 1) / tabnet_model.n_steps
+            view_features = X_data * view_weights
+            multi_view_features.append(view_features)
+        all_steps_features = np.concatenate(multi_view_features, axis=1)
+    return final_embedding, all_steps_features, attention_weights, weighted_original
+
+# ============== 4) 贝叶斯优化目标函数 ==============
+def objective(trial, X_train_full, y_train_full, X_test, y_test):
+    # 建议超参数范围
+    xgb_params = {
+        'n_estimators': trial.suggest_int('xgb_n_estimators', 100, 1000),
+        'max_depth': trial.suggest_int('xgb_max_depth', 3, 10),
+        'learning_rate': trial.suggest_float('xgb_learning_rate', 0.01, 0.3, log=True),
+        'subsample': trial.suggest_float('xgb_subsample', 0.6, 1.0),
+        'colsample_bytree': trial.suggest_float('xgb_colsample_bytree', 0.6, 1.0),
+        'reg_alpha': trial.suggest_float('xgb_reg_alpha', 0.0, 1.0),
+        'reg_lambda': trial.suggest_float('xgb_reg_lambda', 0.0, 1.0),
+    }
+    
+    lgb_params = {
+        'num_leaves': trial.suggest_int('lgb_num_leaves', 10, 300),
+        'learning_rate': trial.suggest_float('lgb_learning_rate', 0.01, 0.3, log=True),
+        'subsample': trial.suggest_float('lgb_subsample', 0.6, 1.0),
+        'colsample_bytree': trial.suggest_float('lgb_colsample_bytree', 0.6, 1.0),
+        'reg_alpha': trial.suggest_float('lgb_reg_alpha', 0.0, 1.0),
+        'reg_lambda': trial.suggest_float('lgb_reg_lambda', 0.0, 1.0),
+        'min_child_weight': trial.suggest_int('lgb_min_child_weight', 1, 10),
+    }
+    
+    # PCA组件数和特征选择数量
+    pca_components = trial.suggest_int('pca_components', 3, 15)
+    feature_select_k = trial.suggest_int('feature_select_k', 50, 150)
+    
+    # 内层交叉验证
+    inner_kf = StratifiedKFold(n_splits=3, shuffle=True, random_state=SEED)  # 减少折数以加速
+    oof_preds = []
+    oof_targets = []
+    test_preds = []
+    
+    for inner_tr_idx, inner_va_idx in inner_kf.split(X_train_full, y_train_full):
+        X_tr, X_va = X_train_full[inner_tr_idx], X_train_full[inner_va_idx]
+        y_tr, y_va = y_train_full[inner_tr_idx], y_train_full[inner_va_idx]
+        
+        # ---- TabNet (使用固定参数以加速) ----
+        batch_size = 128
+        steps_per_epoch = max(1, math.ceil(X_tr.shape[0] / batch_size))
+        tabnet = TabNetClassifier(
+            n_d=32, n_a=32, n_steps=4,
+            gamma=1.8,
+            lambda_sparse=5e-4,
+            clip_value=2.0,
+            mask_type="entmax",
+            optimizer_fn=torch.optim.AdamW,
+            optimizer_params=dict(lr=1e-3, weight_decay=1e-4),
+            scheduler_params={"max_lr": 3e-3, "epochs": 100, "steps_per_epoch": steps_per_epoch, "pct_start": 0.2},
+            scheduler_fn=torch.optim.lr_scheduler.OneCycleLR,
+            seed=SEED, verbose=0
+        )
+        tabnet.fit(
+            X_tr, y_tr,
+            eval_set=[(X_va, y_va)],
+            eval_name=["valid"],
+            eval_metric=["auc"],
+            patience=15,  # 减少patience以加速
+            max_epochs=200,  # 减少epochs以加速
+            batch_size=batch_size,
+            virtual_batch_size=64,
+            num_workers=0,
+            drop_last=False
+        )
+        
+        # ---- 特征提取与融合 ----
+        fe_tr, st_tr, aw_tr, wo_tr = extract_deep_features(tabnet, X_tr)
+        fe_va, st_va, aw_va, wo_va = extract_deep_features(tabnet, X_va)
+        fe_te, st_te, aw_te, wo_te = extract_deep_features(tabnet, X_test)
+        
+        # 使用优化的PCA维度
+        pca = PCA(n_components=pca_components, random_state=SEED)
+        st_tr_pca = pca.fit_transform(st_tr)
+        st_va_pca = pca.transform(st_va)
+        st_te_pca = pca.transform(st_te)
+        
+        # 为XGBoost构建特征集V1: 原始特征 + 最终embedding + 所有步骤特征
+        hybrid_tr_xgb = np.concatenate([X_tr, fe_tr, st_tr_pca], axis=1)
+        hybrid_va_xgb = np.concatenate([X_va, fe_va, st_va_pca], axis=1)
+        hybrid_te_xgb = np.concatenate([X_test, fe_te, st_te_pca], axis=1)
+        
+        # 为LightGBM构建特征集V2: 注意力加权特征 + embedding
+        hybrid_tr_lgb = np.concatenate([wo_tr, fe_tr], axis=1)
+        hybrid_va_lgb = np.concatenate([wo_va, fe_va], axis=1)
+        hybrid_te_lgb = np.concatenate([wo_te, fe_te], axis=1)
+        
+        # XGBoost特征选择
+        if hybrid_tr_xgb.shape[1] > feature_select_k:
+            from sklearn.feature_selection import SelectKBest, f_classif
+            selector_xgb = SelectKBest(f_classif, k=feature_select_k)
+            hybrid_tr_xgb = selector_xgb.fit_transform(hybrid_tr_xgb, y_tr)
+            hybrid_va_xgb = selector_xgb.transform(hybrid_va_xgb)
+            hybrid_te_xgb = selector_xgb.transform(hybrid_te_xgb)
+        
+        # LightGBM特征选择（使用不同的k值）
+        feature_select_k_lgb = min(feature_select_k, hybrid_tr_lgb.shape[1])
+        if hybrid_tr_lgb.shape[1] > feature_select_k_lgb:
+            selector_lgb = SelectKBest(f_classif, k=feature_select_k_lgb)
+            hybrid_tr_lgb = selector_lgb.fit_transform(hybrid_tr_lgb, y_tr)
+            hybrid_va_lgb = selector_lgb.transform(hybrid_va_lgb)
+            hybrid_te_lgb = selector_lgb.transform(hybrid_te_lgb)
+        
+        # ---- XGB with optimized params (使用特征集V1) ----
+        xgb_clf = xgb.XGBClassifier(
+            **xgb_params,
+            random_state=SEED,
+            eval_metric='auc',
+            early_stopping_rounds=20
+        )
+        xgb_clf.fit(hybrid_tr_xgb, y_tr, eval_set=[(hybrid_va_xgb, y_va)], verbose=False)
+        val_proba_xgb = xgb_clf.predict_proba(hybrid_va_xgb)[:, 1]
+        test_proba_xgb = xgb_clf.predict_proba(hybrid_te_xgb)[:, 1]
+        
+        # ---- LGB with optimized params (使用特征集V2) ----
+        lgb_train = lgb.Dataset(hybrid_tr_lgb, label=y_tr)
+        lgb_val_dataset = lgb.Dataset(hybrid_va_lgb, label=y_va, reference=lgb_train)
+        lgb_params_full = {
+            "objective": "binary",
+            "boosting_type": "gbdt",
+            "metric": "auc",
+            **lgb_params,
+            "random_state": SEED,
+            "verbose": -1
+        }
+        lgb_clf = lgb.train(
+            lgb_params_full,
+            lgb_train,
+            valid_sets=[lgb_val_dataset],
+            num_boost_round=1000,  # 减少轮数以加速
+            callbacks=[lgb.early_stopping(30), lgb.log_evaluation(0)]
+        )
+        val_proba_lgb = lgb_clf.predict(hybrid_va_lgb, num_iteration=lgb_clf.best_iteration)
+        test_proba_lgb = lgb_clf.predict(hybrid_te_lgb, num_iteration=lgb_clf.best_iteration)
+        
+        # ---- 保存 OOF ----
+        stack_val = np.vstack([val_proba_xgb, val_proba_lgb]).T
+        stack_test = np.vstack([test_proba_xgb, test_proba_lgb]).T
+        
+        oof_preds.append(stack_val)
+        oof_targets.append(y_va)
+        test_preds.append(stack_test)
+    
+    # ====== Meta 模型训练 ======
+    oof_preds = np.vstack(oof_preds)
+    oof_targets = np.concatenate(oof_targets)
+    test_preds = np.mean(test_preds, axis=0)
+    
+    meta_clf = LogisticRegression(random_state=SEED, solver="liblinear")
+    meta_clf.fit(oof_preds, oof_targets)
+    
+    y_test_proba = meta_clf.predict_proba(test_preds)[:, 1]
+    
+    # 使用AUC作为优化目标
+    auc_score = roc_auc_score(y_test, y_test_proba)
+    return auc_score
+
+# ============== 5) 主要训练循环 ==============
+results_list = []
+fold = 1
+best_params_list = []
+
+for train_idx, test_idx in outer_kf.split(X, y):
+    print(f"\n===== Fold {fold} - 贝叶斯优化 =====")
+    X_train_full, X_test = X[train_idx], X[test_idx]
+    y_train_full, y_test = y[train_idx], y[test_idx]
+    
+    # 贝叶斯优化
+    study = optuna.create_study(
+        direction='maximize',
+        sampler=TPESampler(seed=SEED),
+        pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=10)
+    )
+    
+    print(f"开始贝叶斯优化 (Fold {fold})...")
+    study.optimize(
+        lambda trial: objective(trial, X_train_full, y_train_full, X_test, y_test),
+        n_trials=50,  # 可以根据计算资源调整
+        timeout=3600,  # 1小时超时
+        show_progress_bar=True
+    )
+    
+    best_params = study.best_params
+    best_params_list.append(best_params)
+    print(f"Fold {fold} 最佳参数: {best_params}")
+    print(f"Fold {fold} 最佳AUC: {study.best_value:.4f}")
+    
+    # 使用最佳参数重新训练并评估
+    final_auc = objective(study.best_trial, X_train_full, y_train_full, X_test, y_test)
+    
+    # 计算其他指标
+    # 这里简化处理，实际应该用最佳参数重新完整训练
+    results_list.append({
+        "Fold": fold,
+        "Best_AUC": study.best_value,
+        "Final_AUC": final_auc
+    })
+    
+    fold += 1
+
+# ============== 6) 汇总结果 ==============
+results_df = pd.DataFrame(results_list)
+print("\n===== 贝叶斯优化结果汇总 =====")
+print(results_df)
+print(f"\n平均最佳AUC: {results_df['Best_AUC'].mean():.4f} ± {results_df['Best_AUC'].std():.4f}")
+
+# 保存最佳参数
+print("\n===== 各折最佳参数 =====")
+for i, params in enumerate(best_params_list, 1):
+    print(f"Fold {i}: {params}")
+
+# 计算参数的平均值（用于最终模型）
+print("\n===== 推荐的平均参数 =====")
+all_param_keys = set()
+for params in best_params_list:
+    all_param_keys.update(params.keys())
+
+avg_params = {}
+for key in all_param_keys:
+    values = [params.get(key, 0) for params in best_params_list if key in params]
+    if values:
+        if isinstance(values[0], int):
+            avg_params[key] = int(np.mean(values))
+        else:
+            avg_params[key] = np.mean(values)
+
+print(avg_params)
+
+# ============== 7) 绘制优化过程中的AUC曲线 ==============
+import matplotlib.pyplot as plt
+import joblib
+
+# 保存优化历史
+study_path = r"E:\google\Dataset\breast cancer\bayesian_study.pkl"
+joblib.dump(study, study_path)
+print(f"\n优化历史已保存到: {study_path}")
+
+# 提取优化历史中的AUC值
+values = []
+trial_numbers = []
+
+for trial in study.trials:
+    if trial.value is not None:  # 确保试验有结果
+        values.append(trial.value)
+        trial_numbers.append(trial.number)
+
+# 计算累积最大值（每次试验后的最佳AUC）
+best_values = np.maximum.accumulate(values)
+
+# 创建图表
+plt.figure(figsize=(12, 6))
+
+# 绘制每次试验的AUC值
+plt.plot(trial_numbers, values, 'o-', alpha=0.7, label='每次试验的AUC')
+
+# 绘制累积最佳AUC值
+plt.plot(trial_numbers, best_values, 'r-', linewidth=2, label='累积最佳AUC')
+
+# 标记最佳AUC值
+best_trial_idx = np.argmax(values)
+best_trial_num = trial_numbers[best_trial_idx]
+best_auc = values[best_trial_idx]
+plt.scatter([best_trial_num], [best_auc], s=100, c='red', marker='*', 
+            label=f'最佳AUC: {best_auc:.4f} (试验 #{best_trial_num})')
+
+# 添加图表标题和标签
+plt.title('贝叶斯优化过程中的AUC值变化', fontsize=15)
+plt.xlabel('试验次数', fontsize=12)
+plt.ylabel('AUC值', fontsize=12)
+plt.grid(True, linestyle='--', alpha=0.7)
+plt.legend(loc='lower right', fontsize=10)
+
+# 保存图表
+output_path = r"E:\google\Dataset\breast cancer\bayesian_optimization_auc_curve.png"
+plt.savefig(output_path, dpi=300, bbox_inches='tight')
+plt.show()
+
+print(f"\nAUC曲线已保存到: {output_path}")

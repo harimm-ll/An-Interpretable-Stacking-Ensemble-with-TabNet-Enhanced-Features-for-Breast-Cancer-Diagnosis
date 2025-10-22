@@ -1,0 +1,192 @@
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import StratifiedKFold, train_test_split
+from sklearn.preprocessing import RobustScaler, LabelEncoder
+from sklearn.metrics import accuracy_score, confusion_matrix, f1_score
+from pytorch_tabnet.tab_model import TabNetClassifier
+import torch
+import math
+import warnings
+import xgboost as xgb
+import lightgbm as lgb
+from sklearn.linear_model import LogisticRegression
+
+warnings.filterwarnings("ignore")
+
+# ============== 1) 加载 WDBC 数据集 ==============
+columns = [
+    'ID', 'Diagnosis', 'radius_mean', 'texture_mean', 'perimeter_mean', 'area_mean',
+    'smoothness_mean', 'compactness_mean', 'concavity_mean', 'concave_points_mean',
+    'symmetry_mean', 'fractal_dimension_mean', 'radius_se', 'texture_se',
+    'perimeter_se', 'area_se', 'smoothness_se', 'compactness_se', 'concavity_se',
+    'concave_points_se', 'symmetry_se', 'fractal_dimension_se', 'radius_worst',
+    'texture_worst', 'perimeter_worst', 'area_worst', 'smoothness_worst',
+    'compactness_worst', 'concavity_worst', 'concave_points_worst', 'symmetry_worst',
+    'fractal_dimension_worst'
+]
+
+file_path = r"E:\google\Dataset\breast cancer\breast cancer\wdbc.data"
+df = pd.read_csv(file_path, header=None, names=columns)
+
+df['Diagnosis'] = LabelEncoder().fit_transform(df['Diagnosis'])
+X = df.drop(['ID', 'Diagnosis'], axis=1).values
+y = df['Diagnosis'].values
+
+# 标准化
+scaler = RobustScaler()
+X = scaler.fit_transform(X)
+
+# ============== 2) 参数设置 ==============
+SEED = 42
+torch.manual_seed(SEED)
+np.random.seed(SEED)
+kf = StratifiedKFold(n_splits=5, shuffle=True, random_state=SEED)
+
+results_list = []
+fold = 1
+
+# ============== 3) 交叉验证循环 ==============
+for train_idx, test_idx in kf.split(X, y):
+    print(f"\n===== Fold {fold} =====")
+    X_train_full, X_test = X[train_idx], X[test_idx]
+    y_train_full, y_test = y[train_idx], y[test_idx]
+
+    X_train, X_val, y_train, y_val = train_test_split(
+        X_train_full, y_train_full,
+        test_size=0.2, stratify=y_train_full, random_state=SEED
+    )
+
+    # ============== 3.1 TabNet 训练 ==============
+    batch_size = 128
+    steps_per_epoch = max(1, math.ceil(X_train.shape[0] / batch_size))
+
+    tabnet = TabNetClassifier(
+        n_d=16, n_a=16, n_steps=3,
+        gamma=1.6,
+        lambda_sparse=5e-4,
+        clip_value=2.0,
+        mask_type="entmax",
+        optimizer_fn=torch.optim.AdamW,
+        optimizer_params=dict(lr=1e-3, weight_decay=1e-4),
+        scheduler_params={"max_lr": 3e-3, "epochs": 200, "steps_per_epoch": steps_per_epoch, "pct_start": 0.2},
+        scheduler_fn=torch.optim.lr_scheduler.OneCycleLR,
+        seed=SEED, verbose=0
+    )
+
+    tabnet.fit(
+        X_train, y_train,
+        eval_set=[(X_val, y_val)],
+        eval_name=["valid"],
+        eval_metric=["auc"],
+        patience=13,
+        max_epochs=200,
+        batch_size=batch_size,
+        virtual_batch_size=64,
+        num_workers=0,
+        drop_last=False
+    )
+
+    # ============== 3.2 提取 TabNet embedding ==============
+    tabnet.network.eval()
+    with torch.no_grad():
+        embed_train = tabnet.network(torch.tensor(X_train).float())[0].cpu().numpy()
+        embed_val   = tabnet.network(torch.tensor(X_val).float())[0].cpu().numpy()
+        embed_test  = tabnet.network(torch.tensor(X_test).float())[0].cpu().numpy()
+
+    # ============== 3.3 XGBoost 分类器 ==============
+    xgb_clf = xgb.XGBClassifier(
+        n_estimators=1000,
+        max_depth=6,
+        learning_rate=0.01,
+        subsample=0.9,
+        colsample_bytree=0.9,
+        min_child_weight=10,
+        reg_lambda=2.0,
+        reg_alpha=1.0,
+        random_state=SEED,
+        eval_metric="auc"
+    )
+    xgb_clf.fit(embed_train, y_train, eval_set=[(embed_val, y_val)], verbose=False)
+
+    val_proba_xgb = xgb_clf.predict_proba(embed_val)[:, 1]
+    test_proba_xgb = xgb_clf.predict_proba(embed_test)[:, 1]
+
+    # ============== 3.4 LightGBM 分类器 ==============
+    lgb_train = lgb.Dataset(embed_train, label=y_train)
+    lgb_val   = lgb.Dataset(embed_val, label=y_val, reference=lgb_train)
+
+    params = {
+        "objective": "binary",
+        "boosting_type": "gbdt",
+        "metric": "auc",
+        "num_leaves": 31,
+        "learning_rate": 0.01,
+        "n_estimators": 1000,
+        "subsample": 0.9,
+        "colsample_bytree": 0.9,
+        "reg_alpha": 1.0,
+        "reg_lambda": 2.0,
+        "min_child_weight": 10,
+        "random_state": SEED,
+        "verbose": -1
+    }
+
+    lgb_clf = lgb.train(
+        params,
+        lgb_train,
+        valid_sets=[lgb_val],
+        num_boost_round=2000,
+        callbacks=[lgb.early_stopping(50), lgb.log_evaluation(0)]
+    )
+
+    val_proba_lgb = lgb_clf.predict(embed_val, num_iteration=lgb_clf.best_iteration)
+    test_proba_lgb = lgb_clf.predict(embed_test, num_iteration=lgb_clf.best_iteration)
+
+    # ============== 3.5 Stacking (Logistic Regression as Meta) ==============
+    # 构造二级训练数据
+    stack_val = np.vstack([val_proba_xgb, val_proba_lgb]).T
+    stack_test = np.vstack([test_proba_xgb, test_proba_lgb]).T
+
+    meta_clf = LogisticRegression(random_state=SEED, solver="liblinear")
+    meta_clf.fit(stack_val, y_val)
+
+    val_proba_meta = meta_clf.predict_proba(stack_val)[:, 1]
+
+    # ---- 阈值选择 (F1-maximizing) ----
+    thresholds = np.linspace(0.1, 0.9, 81)
+    best_f1 = 0
+    best_thr = 0.5
+    for thr in thresholds:
+        y_val_pred = (val_proba_meta >= thr).astype(int)
+        f1 = f1_score(y_val, y_val_pred)
+        if f1 > best_f1:
+            best_f1 = f1
+            best_thr = thr
+
+    # ============== 3.6 测试集评估 ==============
+    y_test_proba = meta_clf.predict_proba(stack_test)[:, 1]
+    y_test_pred = (y_test_proba >= best_thr).astype(int)
+
+    acc = accuracy_score(y_test, y_test_pred)
+    f1 = f1_score(y_test, y_test_pred)
+    tn, fp, fn, tp = confusion_matrix(y_test, y_test_pred).ravel()
+    sens = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    spec = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+
+    print(f"Fold {fold} | Thr={best_thr:.3f} | Acc={acc:.4f} | Sens={sens:.4f} | Spec={spec:.4f} | F1={f1:.4f}")
+    results_list.append({
+        "Fold": fold,
+        "Acc": acc,
+        "Sens": sens,
+        "Spec": spec,
+        "F1": f1,
+        "Best_thr": best_thr
+    })
+    fold += 1
+
+# ============== 4) 汇总结果 ==============
+results_df = pd.DataFrame(results_list)
+print("\n===== 汇总结果 =====")
+print(results_df)
+print("\n平均结果：")
+print(results_df.mean(numeric_only=True))
