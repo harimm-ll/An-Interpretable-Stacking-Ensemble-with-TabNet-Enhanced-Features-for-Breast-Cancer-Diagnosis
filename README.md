@@ -76,6 +76,7 @@ The following model configurations were compared using the same nested cross-val
 ## Expected Results
 
 * The script will print averaged performance metrics (Accuracy, Sensitivity, Specificity) to the console, consistent with those reported in the paper (e.g., average accuracy approx. **97.5% ± 1.3%**).
+* SHAP summary plots (`meta_model_shap_fold_*.png`, `xgboost_shap_fold_*.png`, `lightgbm_shap_fold_*.png`) will be generated and saved in the script's directory for each fold, visualizing feature importance.
 <img width="719" height="399" alt="屏幕截图 2025-10-22 155703" src="https://github.com/user-attachments/assets/3a21072f-5975-40dc-a762-dfbaaebdbaf0" />
 
 
