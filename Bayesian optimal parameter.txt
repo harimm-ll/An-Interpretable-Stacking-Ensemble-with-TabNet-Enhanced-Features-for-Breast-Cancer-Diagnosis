@@ -1,0 +1,16 @@
+{'xgb_n_estimators': 666, '
+xgb_reg_alpha': 0.4694476190166507,
+ 'xgb_reg_lambda': 0.4720598960008508, 
+'pca_components': 7, 
+'feature_select_k': 74, 
+'xgb_max_depth': 6,
+ 'lgb_min_child_weight': 5, 
+'lgb_reg_alpha': 0.7654042315413377,
+ 'xgb_subsample': 0.7644597309268291,
+ 'xgb_colsample_bytree': 0.7369935100635556,
+ 'lgb_colsample_bytree': 0.6699534920575212, 
+'lgb_subsample': 0.8208299146247434, 
+'xgb_learning_rate': 0.14987483415553812,
+ 'lgb_num_leaves': 146, 
+'lgb_reg_lambda': 0.44639959675640795, 
+'lgb_learning_rate': 0.07731211079581099}
