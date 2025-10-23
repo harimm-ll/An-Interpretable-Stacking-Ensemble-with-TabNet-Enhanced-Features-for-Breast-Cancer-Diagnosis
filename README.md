@@ -65,12 +65,14 @@ The following model configurations were compared using the same nested cross-val
 
 **Code for Ablation Study:**        
 * `src/`: [Click to open the source code folder](./src/)
-    * `Bayesian_Optimization/`: [Bayesian Optimization scripts](./src/Bayesian_Optimization/)
-    * `FinalModel/`: [The complete Stacking model for the paper](./src/FinalModel/)
-    * `TabNet+LightGBM/`: [Ablation study code (TabNet + LGBM)](./src/TabNet+LightGBM/)
+    * `bc_test.py`: [TabNet as baseline model](./src/bc_test.py)
+    * `TabNet+LightGBM/`: [Ablation study code (TabNet + LGB)](./src/TabNet+LightGBM/)
     * `TabNet+XGBoost/`: [Ablation study code (TabNet + XGB)](./src/TabNet+XGBoost/)
-    * `TabNet+XGBoost+LightGBM/`: [Ablation study code (All models)](./src/TabNet+XGBoost+LightGBM/)
-    * `bc_test.py`: [Main script to run tests or the final model](./src/bc_test.py)
+    * `TabNet+XGBoost+LightGBM/`: [Ablation study code (simple averaging of XGB and LGB)](./src/TabNet+XGBoost+LightGBM/)
+    * `FinalModel/`: [The complete Stacking model for the paper](./src/FinalModel/)
+    * `Bayesian_Optimization/`: [Bayesian Optimization scripts](./src/Bayesian_Optimization/)
+  
+    *Note:* The `src/FinalModel.py` script, used to generate the final modle, utilizes fixed hyperparameters derived from the Bayesian Optimization process (implemented in `src/Bayesian_Optimization.py`).
 ---
 
 ## Expected Results
