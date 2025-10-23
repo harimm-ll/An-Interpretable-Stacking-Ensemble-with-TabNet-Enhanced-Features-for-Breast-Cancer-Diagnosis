@@ -7,6 +7,19 @@
 >**Abstract**:Addressing the challenge of balancing accuracy and interpretability in breast cancer diagnosis, this work introduces a novel interpretable stacking ensemble. It utilizes TabNet as a deep feature extractor feeding differentiated feature sets to XGBoost and LightGBM base learners in a dual-pathway architecture, integrated by Logistic Regression. Validated via nested cross-validation on the WDBC dataset, the model achieves high accuracy (97.5% ± 1.3%), outperforming baselines. An end-to-end SHAP framework ensures multi-level interpretability aligned with clinical knowledge, demonstrating a path towards trustworthy AI decision support.
 ---
 
+## Contents
+
+* [Key Features & Contributions](#key-features--contributions)
+* [Model Architecture Overview](#model-architecture-overview)
+* [Dataset](#dataset)
+* [Experimental Setup](#experimental-setup)
+* [Ablation Study](#ablation-study)
+* [Expected Results](#expected-results)
+
+
+
+---
+
 ## Key Features & Contributions
 
 * **Novel Use of TabNet:** Leverages TabNet as a sophisticated deep feature extractor.
