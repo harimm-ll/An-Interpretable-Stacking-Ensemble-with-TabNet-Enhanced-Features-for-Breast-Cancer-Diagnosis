@@ -470,41 +470,9 @@ for train_idx, test_idx in outer_kf.split(X, y):
     except Exception as e:
         print(f"LightGBM SHAP analysis failed: {e}")
     
-    # 4. 模型架构与SHAP分析总结
-    print(f"\n=== Model Architecture Summary for Fold {fold} ===")
-    print(f"\n🏗️  整体架构:")
-    print(f"   ├── 外层5折交叉验证 (当前: Fold {fold})")
-    print(f"   ├── 内层4折交叉验证 (用于OOF Stacking)")
-    print(f"   └── 三层模型集成架构")
     
-    print(f"\n🧠 第一层: TabNet深度特征提取器")
-    print(f"   ├── 架构: n_d=32, n_a=32, n_steps=4")
-    print(f"   ├── 输出1: 最终嵌入特征 (32维)")
-    print(f"   ├── 输出2: 多步骤特征 (4×32=128维)")
-    print(f"   └── 输出3: 注意力加权原始特征 (30维)")
     
-    print(f"\n🌳 第二层: 双路径基学习器")
-    print(f"   ├── XGBoost路径 (特征集V1):")
-    print(f"   │   ├── 输入: 原始特征(30) + TabNet嵌入(32) + PCA步骤特征(8)")
-    print(f"   │   ├── 特征选择: SelectKBest保留{feature_select_k}个特征")
-    print(f"   │   └── 参数: n_estimators=569, max_depth=5, lr=0.34155")
-    print(f"   └── LightGBM路径 (特征集V2):")
-    print(f"       ├── 输入: 注意力加权特征(30) + TabNet嵌入(32) = 62维")
-    print(f"       ├── 特征选择: 无需选择（特征数62 < {feature_select_k}）")
-    print(f"       └── 参数: num_leaves=146, lr=0.0773, subsample=0.7682")
-    
-    print(f"\n🎯 第三层: 元学习器 (Stacking)")
-    print(f"   ├── 模型: LogisticRegression")
-    print(f"   ├── 输入: XGBoost概率 + LightGBM概率")
-    print(f"   └── 输出: 最终预测概率")
-    
-    print(f"\n📊 SHAP分析说明:")
-    print(f"   ├── 元模型SHAP: 分析XGBoost vs LightGBM的贡献权重")
-    print(f"   ├── XGBoost SHAP: 分析混合特征集V1中各特征的重要性")
-    print(f"   ├── LightGBM SHAP: 分析混合特征集V2中各特征的重要性")
-    print(f"   └── 特征命名: 包含原始特征名、TabNet嵌入、PCA组件等")
-    
-    print(f"\n✅ SHAP analysis completed for Fold {fold}")
+    print(f"\n SHAP analysis completed for Fold {fold}")
     print(f"Thr={best_thr:.3f} | Acc={acc:.4f} | Sens={sens:.4f} | Spec={spec:.4f} | F1={f1:.4f} | Youden_J={best_youden_j:.4f}")
     results_list.append({
         "Acc": acc,
@@ -523,55 +491,5 @@ print(results_df)
 print("\n平均结果：")
 print(results_df.mean(numeric_only=True))
 
-# ============== 最终 SHAP 汇总分析 ==============
-print("\n" + "="*80)
-print("🎯 FINAL SHAP ANALYSIS SUMMARY")
-print("="*80)
-print(f"\n📁 生成的SHAP可视化文件 (共{n_splits * 3}个):")
-for fold_num in range(1, n_splits + 1):
-    print(f"\n  📊 Fold {fold_num}:")
-    print(f"    ├── meta_model_shap_fold_{fold_num}.png")
-    print(f"    │   └── 元模型决策过程: XGBoost vs LightGBM贡献权重")
-    print(f"    ├── xgboost_shap_fold_{fold_num}.png")
-    print(f"    │   └── XGBoost特征重要性: 混合特征集V1 (原始+嵌入+PCA)")
-    print(f"    └── lightgbm_shap_fold_{fold_num}.png")
-    print(f"        └── LightGBM特征重要性: 混合特征集V2 (加权+嵌入)")
 
-print(f"\n🔍 SHAP分析深度解读:")
-print(f"\n1️⃣  元模型层面 (Meta-Model Level):")
-print(f"   🎯 目标: 理解Stacking集成中基模型的权重分配")
-print(f"   📊 方法: LinearExplainer分析LogisticRegression")
-print(f"   💡 洞察: 揭示XGBoost vs LightGBM在最终决策中的相对重要性")
 
-print(f"\n2️⃣  XGBoost模型层面:")
-print(f"   🎯 目标: 分析特征集V1中各特征对预测的贡献")
-print(f"   📊 方法: TreeExplainer分析内部CV最后fold的XGBoost模型")
-print(f"   🔧 特征工程: 原始特征(30) + TabNet嵌入(32) + PCA步骤特征(8)")
-print(f"   🎛️  特征选择: SelectKBest保留前{feature_select_k}个最重要特征")
-print(f"   💡 洞察: 识别在梯度提升框架下最具预测价值的混合特征")
-
-print(f"\n3️⃣  LightGBM模型层面:")
-print(f"   🎯 目标: 分析特征集V2中各特征对预测的贡献")
-print(f"   📊 方法: TreeExplainer分析内部CV最后fold的LightGBM模型")
-print(f"   🔧 特征工程: 注意力加权特征(30) + TabNet嵌入(32) = 62维")
-print(f"   🎛️  特征选择: 由于特征数(62) < {feature_select_k}，无需特征选择")
-print(f"   💡 洞察: 揭示注意力机制增强特征的预测价值")
-
-print(f"\n🧠 技术创新点:")
-print(f"   ✨ 多层次特征命名: 区分原始特征、TabNet嵌入、PCA组件")
-print(f"   ✨ 真实模型分析: 使用内部CV实际训练的模型进行SHAP分析")
-print(f"   ✨ 差异化特征集: V1(PCA降维) vs V2(注意力加权)")
-print(f"   ✨ 完整解释链: 从特征→基模型→元模型的全链路解释")
-
-print(f"\n📈 分析价值:")
-print(f"   🔬 模型透明度: 深度理解复杂集成模型的决策机制")
-print(f"   🎯 特征洞察: 识别乳腺癌诊断中最关键的生物标志物")
-print(f"   ⚖️  模型对比: 量化不同算法在特征利用上的差异")
-print(f"   🛠️  优化指导: 为模型改进和特征工程提供数据驱动的建议")
-
-print(f"\n" + "="*80)
-print(f"✅ SHAP Analysis Pipeline Completed Successfully!")
-print(f"📊 Total Visualizations Generated: {n_splits * 3}")
-print(f"🔍 Analysis Depth: 3-Layer Model Architecture")
-print(f"📈 Feature Coverage: {len(original_feature_names)} Original + TabNet Embeddings + Engineered Features")
-print("="*80)
