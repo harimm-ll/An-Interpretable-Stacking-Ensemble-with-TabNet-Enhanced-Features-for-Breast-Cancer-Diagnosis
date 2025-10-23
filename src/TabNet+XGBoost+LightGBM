@@ -9,7 +9,7 @@ import math
 import warnings
 import xgboost as xgb
 import lightgbm as lgb
-from sklearn.linear_model import LogisticRegression
+
 
 warnings.filterwarnings("ignore")
 
@@ -142,33 +142,31 @@ for train_idx, test_idx in kf.split(X, y):
     val_proba_lgb = lgb_clf.predict(embed_val, num_iteration=lgb_clf.best_iteration)
     test_proba_lgb = lgb_clf.predict(embed_test, num_iteration=lgb_clf.best_iteration)
 
-    # ============== 3.5 Stacking (Logistic Regression as Meta) ==============
-    # 构造二级训练数据
-    stack_val = np.vstack([val_proba_xgb, val_proba_lgb]).T
-    stack_test = np.vstack([test_proba_xgb, test_proba_lgb]).T
+    # ============== 3.5 简单平均 (Averaging) ==============
+    
+    # 1. 计算验证集上的平均概率
+    val_proba_avg = (val_proba_xgb + val_proba_lgb) / 2.0
+    
+    # 2. 计算测试集上的平均概率
+    test_proba_avg = (test_proba_xgb + test_proba_lgb) / 2.0
 
-    meta_clf = LogisticRegression(random_state=SEED, solver="liblinear")
-    meta_clf.fit(stack_val, y_val)
-
-    val_proba_meta = meta_clf.predict_proba(stack_val)[:, 1]
-
-    # ---- 阈值选择 (F1-maximizing) ----
+    # 3. 阈值选择 (F1-maximizing) - 使用验证集的平均概率
     thresholds = np.linspace(0.1, 0.9, 81)
     best_f1 = 0
     best_thr = 0.5
     for thr in thresholds:
-        y_val_pred = (val_proba_meta >= thr).astype(int)
-        f1 = f1_score(y_val, y_val_pred)
-        if f1 > best_f1:
-            best_f1 = f1
+        y_val_pred = (val_proba_avg >= thr).astype(int)
+        f1_val_loop = f1_score(y_val, y_val_pred)
+        if f1_val_loop > best_f1:
+            best_f1 = f1_val_loop
             best_thr = thr
-
-    # ============== 3.6 测试集评估 ==============
-    y_test_proba = meta_clf.predict_proba(stack_test)[:, 1]
-    y_test_pred = (y_test_proba >= best_thr).astype(int)
+            
+    # ============== 3.6 测试集评估 (使用平均概率和最佳阈值) ==============
+    y_test_proba = test_proba_avg # 使用 3.5 中计算的测试集平均概率
+    y_test_pred = (y_test_proba >= best_thr).astype(int) # 使用在验证集上找到的最佳阈值
 
     acc = accuracy_score(y_test, y_test_pred)
-    f1 = f1_score(y_test, y_test_pred)
+    f1 = f1_score(y_test, y_test_pred) # 最终的 F1
     tn, fp, fn, tp = confusion_matrix(y_test, y_test_pred).ravel()
     sens = tp / (tp + fn) if (tp + fn) > 0 else 0.0
     spec = tn / (tn + fp) if (tn + fp) > 0 else 0.0
