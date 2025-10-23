@@ -269,7 +269,7 @@ for train_idx, test_idx in outer_kf.split(X, y):
     final_auc = objective(study.best_trial, X_train_full, y_train_full, X_test, y_test)
     
     # 计算其他指标
-    # 这里简化处理，实际应该用最佳参数重新完整训练
+    
     results_list.append({
         "Fold": fold,
         "Best_AUC": study.best_value,
